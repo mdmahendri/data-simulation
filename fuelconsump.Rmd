@@ -1,0 +1,158 @@
+---
+title: "Determinants of Cars Fuel Consumption"
+date: "June 21, 2018"
+output:
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(rjags)
+```
+
+## Abstract
+In this analysis, i try to find what specification of cars can affect fuel consumption. The data consist of categorical and continuous variable, because of that I choose to use linear regression because it can handle two type above. I fit two model using the data available. The difference is that model one use all variables where model 2 exclude two variables, namely `cyl` and `disp`. After diagnosting for model performance, we conclude that model 1 give better performance than model 2. But some coefficient on model 1 is not significant, only weight of cars is strongly associated with fuel consumption.
+
+## Introduction
+Fuel is one of many resources that scarce and needed as energy for cars. There are many factor that influence fuels consumption, such as car specification, how old the car is, situation with traffic. Saving on fuel consumption can reduce expense for many folds, because of the nature that cars usually used everyday. This analysis want to explore what specification and design of cars affect on fuel consumption.
+
+## Data
+Data is acquired from 1974 Motor Trend US magazine. Data consist of fuel consumption and 10 specification of cars.
+```{r echo=FALSE}
+head(mtcars)
+```
+This data will be able to answer question of what specification on cars affect fuels consumption. `mpg` is miles per gallon which measure how much miles it can reach before depleting one gallon of fuel. I will explore how it changes by using other ten variables.
+
+Ten variables are consist of cylinders count `cyl`, engine displacement `disp`, horse power `hp`, axle ratio `drat`, weight of cars `wt`, time on 1/4 mile `qsec`, is straight engine `vs`, is transmission manual `am`, number of forward gears `gear`, number of carburetors `carb`
+
+There are no missing in data that is used
+```{r}
+any(is.na(mtcars))
+```
+
+Continue on visualizing the data, let see how variables correlated to each other. But omit the `vs` and `am` variable as it is factor variable not numeric
+```{r echo=FALSE}
+corrplot::corrplot.mixed(cor(mtcars[,c(-8,-9)]))
+```
+As we can see above, weight is the most highly correlated with consumption of fuels. This is not surprising as the energy to move vehicle related to how much they moved.
+
+But there is collinearity between weight, cylinder, and displacement. After look at the definition, displacement is the result of a constant multiplied by cylinder. As number of cylinder increase, the weight is too. So remove displacement and cylinder from variables as it will be represented by weight. If collinearity not addressed, it will fight for the power of determining the fuel consumption. 
+
+## Model
+Linear regression is appropriate for modeling because `mpg` is continuous variable. Model is also capable of handling numeric and factor variables. By doing linear regression, i will obtain coefficients of each variables. This coefficient will help in determining whether variables is truly affecting fuel consumption.
+
+The idea here is if coefficients posterior distribution favor value near zero that means the variables is not much to use in determining fuel consumption. But if coefficients distribution is away from zero then it suggest that variables have relationships with fuel consumption.
+
+We will assume that data is following linear regression assumption where it come from normal distribution. Expectation or mean of each observation is coefficient times variables, where it has same variance for all observation. For known sigma, prior for mean of normal is normal too. Coefficient use normal prior with mean 0 because it can take positive, negative value and make it non-informative. Non-informative because do not have a believe about coefficient, so let the data choose. Prior for sigma2 when mean known is Inverse Gamma, with effective sample size to 1.0 and guess for sigma 1.0
+
+$$ y_i | \textbf{x}, \boldsymbol{\beta}, \sigma^2 \overset{ind}{\sim} N(\beta_0 + \beta_1x_{1i} + ... + \beta_kx_{ki},\sigma^2) \quad k = 1, 2, ..., n$$
+$$ \beta_j \overset{iid}{\sim} N(0, 10^6) \quad j = 1, 2, ..., n.coef $$
+$$ \sigma^2 {\sim} IG(\frac{1}{2}, \frac{1}{2}) $$
+
+The model written in rjags is follow
+```{r}
+mod1_string <- 'model {
+    for (i in 1:length(mpg)) {
+        mpg[i] ~ dnorm(mu[i], prec)
+        mu[i] = b0 + b[1]*hp[i] + b[2]*drat[i] + b[3]*wt[i] + b[4]*qsec[i]
+        + b[5]*vs[i] + b[6]*am[i] + b[7]*gear[i] + b[8]*carb[i]
+    }
+    
+    b0 ~ dnorm(0, 1/1e6)
+    for (j in 1:8) {
+        b[j] ~ dnorm(0.0, 1/1e6)
+    }
+    
+    prec ~ dgamma(1.0/2.0, 1.0/2.0)
+}'
+```
+
+After defining model, data that inputed into model is `as.list(mtcars)` where parameter that i want to monitor is b from 0 to 8. Run JAGS with 100000 iterations and 3 chains.
+
+```{r include=FALSE}
+data_jags <- as.list(mtcars)
+params <- c('b0', 'b')
+mod1 <- jags.model(textConnection(mod1_string), data = data_jags, n.chains = 3)
+update(mod1, 1e3)
+mod1_sim <- coda.samples(mod1, variable.names = params, n.iter = 1e5)
+mod1_csim <- as.mcmc(do.call(rbind, mod1_sim))
+```
+
+After running model, check if chains already reach convergence. Gelman-Rubin diagnostic is used instead of plot because the number of parameters is high.
+
+After calculation, scale reduction factor is near one, so chains have reached convergence. we can now proceed into autocorrelation check.
+
+Chains is highly autocorrelated, because i only get small number of effective sample. But i already use sample size of 100000, so it is safe.
+
+```{r include=FALSE}
+gelman.diag(mod1_sim)
+```
+
+```{r include=FALSE}
+effectiveSize(mod1_sim)
+```
+
+After analyzing, lets look at how well model fit by looking at residual. Based on plot result, residual is reasonable, no outlier found. So we can say that model is follow assumption of linear regression
+```{r include=FALSE}
+X1 <- cbind(as.matrix(mtcars[,c(-1,-2,-3)]), rep(1, nrow(mtcars)))
+pm1_params <- colMeans(mod1_csim)
+yhat1 <- drop(X1 %*% pm1_params)
+resid1 <- mtcars$mpg - yhat1
+plot(resid1)
+```
+
+But, after checking summary of the model, only weight is not favoring value near zero. So let propose another model where `mpg` only depend on `wt`. Run model below with similar setup to model 1
+```{r}
+mod2_string <- 'model {
+    for (i in 1:length(mpg)) {
+        mpg[i] ~ dnorm(mu[i], prec)
+        mu[i] = b0 + b1 * wt[i]
+    }
+    
+    b0 ~ dnorm(0, 1/1e6)
+    b1 ~ dnorm(0, 1/1e6)
+    
+    prec ~ dgamma(1.0/2.0, 1.0/2.0)
+}'
+```
+
+```{r include=FALSE}
+params <- c('b0', 'b1')
+mod2 <- jags.model(textConnection(mod2_string), data = data_jags, n.chains = 3)
+update(mod2, 1e3)
+mod2_sim <- coda.samples(mod2, variable.names = params, n.iter = 1e5)
+mod2_csim <- as.mcmc(do.call(rbind, mod2_sim))
+```
+
+Lets check convergence and autocorrelation of model 2. Model reach convergence but still suffer from autocorrelation too. Check on residual plot of model 2, it still follow assumption of linear regression. Coefficient on `wt` for model 1 and model 2 is having the same sign. Next i proceed on to performance comparation on two model
+```{r include=FALSE}
+gelman.diag(mod2_sim)
+```
+
+```{r include=FALSE}
+autocorr.diag(mod2_sim)
+```
+
+```{r include=FALSE}
+X2 <- cbind(rep(1, nrow(mtcars)), as.matrix(mtcars[,6]))
+pm2_params <- colMeans(mod2_csim)
+yhat2 <- drop(X2 %*% pm2_params)
+resid2 <- mtcars$mpg - yhat2
+plot(resid2)
+```
+
+Let compare DIC of two model
+```{r echo=FALSE}
+cat('DIC Model 1')
+dic.samples(mod1, n.iter = 1e3)
+```
+```{r echo=FALSE}
+cat('DIC Model 2')
+dic.samples(mod2, n.iter = 1e3)
+```
+Based on DIC, we prefer model 1. Despite having more complexity, it still have higher log likelihood.
+
+## Results
+After fit the model above, i can conclude that weight is the only significant predictor of fuels consumption. The other have small to none effect for fuels consumption. Model 1 and Model 2 conclude into the same effect of weight into fuels consumption, more weight require more fuels. More importantly 95% posterior interval for weight coefficient do not touch zero value.
+
+Despite being able to produce adequate model, i believe there is still much more improvement on modeling of this data.
